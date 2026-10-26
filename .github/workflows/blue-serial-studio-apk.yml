@@ -5,6 +5,7 @@ on:
     branches: [blue-serial-studio]
     paths:
       - 'payload/**'
+      - 'patches/**'
       - '.github/workflows/blue-serial-studio-apk.yml'
   workflow_dispatch:
 
@@ -28,6 +29,10 @@ jobs:
           tar -xJf BlueSerialStudio_source.tar.xz -C unpacked
           test -f unpacked/settings.gradle
           test -f unpacked/app/src/main/AndroidManifest.xml
+          echo "c9c76b6ad2f1c110f74be8f5654692ee7e378a385d6850dbd5bc2421c30358e3  patches/v1.1.patch.gz.b64" | sha256sum --check
+          base64 --decode patches/v1.1.patch.gz.b64 | gzip -dc > v1.1.patch
+          echo "e3a477a9e01e8f22a87f77a22423df728d5292cf5c3a3940661155adf8451ffc  v1.1.patch" | sha256sum --check
+          (cd unpacked && git apply --check ../v1.1.patch && git apply ../v1.1.patch)
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -57,7 +62,7 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: BlueSerialStudio-debug-apk
+          name: BlueSerialStudio-v1.1-debug-apk
           path: unpacked/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
@@ -67,10 +72,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p downloads
-          cp unpacked/app/build/outputs/apk/debug/app-debug.apk downloads/BlueSerialStudio-debug.apk
+          cp unpacked/app/build/outputs/apk/debug/app-debug.apk downloads/BlueSerialStudio-v1.1-debug.apk
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add downloads/BlueSerialStudio-debug.apk
+          git add downloads/BlueSerialStudio-v1.1-debug.apk
           if ! git diff --cached --quiet; then
             git commit -m "build: publish downloadable BlueSerialStudio APK"
             git push origin HEAD:blue-serial-studio
