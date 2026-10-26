@@ -36,7 +36,11 @@ jobs:
           echo "069a446ffe5f05c5a7729e09f18f5678e8dfaac53bcc588baa62d0dcb17a5b5d  patches/v1.2.patch.gz.b64" | sha256sum --check
           base64 --decode patches/v1.2.patch.gz.b64 | gzip -dc > v1.2.patch
           echo "4b2eebc43957b8f0f82c5139e7e83008c3cddeb2819210aec67f76d6d830f2bf  v1.2.patch" | sha256sum --check
-          (cd unpacked && git apply --check ../v1.2.patch && git apply ../v1.2.patch)
+          patch -d unpacked -p1 --forward --batch --dry-run < v1.2.patch
+          patch -d unpacked -p1 --forward --batch < v1.2.patch
+          test -f unpacked/qa/check_source.py
+          test -f unpacked/tests/ProtocolSelfTest.java
+          grep -F "versionName '1.2.0'" unpacked/app/build.gradle
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
