@@ -41,6 +41,12 @@ jobs:
           test -f unpacked/qa/check_source.py
           test -f unpacked/tests/ProtocolSelfTest.java
           grep -F "versionName '1.2.0'" unpacked/app/build.gradle
+          echo "4ec635f3735af80924a795684ced3a4a955a3739328f3104011aff852fcfdd62  patches/v1.3.patch.gz.b64" | sha256sum --check
+          base64 --decode patches/v1.3.patch.gz.b64 | gzip -dc > v1.3.patch
+          echo "3ac8a06a7483d137b8aeb98f8cbe49a85a02f105ca084159dfc101e8f35809f3  v1.3.patch" | sha256sum --check
+          (cd unpacked && git apply --check ../v1.3.patch && git apply ../v1.3.patch)
+          test -f unpacked/app/src/main/java/com/embedded/blueserial/DriveControlMath.java
+          grep -F "versionName '1.3.0'" unpacked/app/build.gradle
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -55,7 +61,7 @@ jobs:
           set -euo pipefail
           python3 qa/check_source.py
           mkdir -p build/protocol-tests
-          javac -d build/protocol-tests app/src/main/java/com/embedded/blueserial/SerialProtocol.java tests/ProtocolSelfTest.java
+          javac -d build/protocol-tests app/src/main/java/com/embedded/blueserial/SerialProtocol.java app/src/main/java/com/embedded/blueserial/DriveControlMath.java tests/ProtocolSelfTest.java
           java -cp build/protocol-tests ProtocolSelfTest
 
       - name: Install Android SDK 35
@@ -80,7 +86,7 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: BlueSerialStudio-v1.2-debug-apk
+          name: BlueSerialStudio-v1.3-debug-apk
           path: unpacked/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
@@ -90,12 +96,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p downloads
-          cp unpacked/app/build/outputs/apk/debug/app-debug.apk downloads/BlueSerialStudio-v1.2-debug.apk
+          cp unpacked/app/build/outputs/apk/debug/app-debug.apk downloads/BlueSerialStudio-v1.3-debug.apk
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           mkdir -p BlueSerialStudio
           tar -C unpacked --exclude='.gradle' --exclude='*/build' --exclude='build' -cf - . | tar -C BlueSerialStudio -xf -
-          git add BlueSerialStudio downloads/BlueSerialStudio-v1.2-debug.apk
+          git add BlueSerialStudio downloads/BlueSerialStudio-v1.3-debug.apk
           if ! git diff --cached --quiet; then
             git commit -m "build: publish downloadable BlueSerialStudio APK"
             git push origin HEAD:blue-serial-studio
