@@ -1,0 +1,57 @@
+name: Build BlueSerialStudio APK
+
+on:
+  push:
+    branches:
+      - blue-serial-studio
+    paths:
+      - BlueSerialStudio_v1_source.zip
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Validate and unpack source ZIP
+        shell: bash
+        run: |
+          test -f BlueSerialStudio_v1_source.zip
+          unzip -t BlueSerialStudio_v1_source.zip
+          mkdir -p unpacked
+          unzip -q BlueSerialStudio_v1_source.zip -d unpacked
+          test -f unpacked/BlueSerialStudio/settings.gradle
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 35 SDK
+        run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Build installable debug APK
+        working-directory: unpacked/BlueSerialStudio
+        run: gradle --no-daemon assembleDebug
+
+      - name: Publish APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlueSerialStudio-debug-apk
+          path: unpacked/BlueSerialStudio/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
