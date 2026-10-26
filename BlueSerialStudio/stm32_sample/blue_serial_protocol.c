@@ -1,4 +1,5 @@
 #include "blue_serial_protocol.h"
+#include "blue_serial_drive_mixer.h"
 #include "stm32f10x.h"
 #include "misc.h"
 #include <stdio.h>
@@ -101,9 +102,11 @@ static void parse_line(char *s) {
     else if (strcmp(s, "S") == 0) { BlueSerial_Motors(0, 0); motion_active = 0; }
     else if (strcmp(s, "BEEP") == 0) BlueSerial_Beep();
     else if (sscanf(s, "J,%d,%d", &x, &y) == 2) {
-        /* differential drive: +x right turn; +y forwards */
-        x = clamp(x, -100, 100); y = clamp(y, -100, 100);
-        drive(y + x, y - x);
+        /* A single mixed state prevents forward/turn command conflicts.
+           While moving, the inside wheel slows without suddenly reversing. */
+        int left, right;
+        BlueSerial_MixWheels(x, y, &left, &right);
+        drive(left, right);
     }
     else if (sscanf(s, "PWM,%d", &v) == 1) {
         /* Use equal left/right speed as a simple standalone example. */

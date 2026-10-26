@@ -17,6 +17,8 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Thread-safe Classic Bluetooth SPP client. Never blocks Android's main thread. */
 public final class BluetoothSppClient {
@@ -32,6 +34,8 @@ public final class BluetoothSppClient {
     private final ThreadPoolExecutor writeQueue = new ThreadPoolExecutor(
         1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
     private final AtomicInteger generation = new AtomicInteger();
+    private final AtomicReference<byte[]> latestDrive = new AtomicReference<>();
+    private final AtomicBoolean drivePumpQueued = new AtomicBoolean(false);
     private final Object socketLock = new Object();
     private final Listener listener;
     private volatile BluetoothSocket socket;
@@ -110,8 +114,33 @@ public final class BluetoothSppClient {
     /** Stop/neutral packets supersede any unsent motion/control backlog. */
     public void sendUrgent(byte[] bytes) {
         if (!connected || bytes.length == 0) return;
+        latestDrive.set(null);
         writeQueue.getQueue().clear();
         send(bytes);
+    }
+
+    /** Coalesce continuously changing joystick/button states: never accumulate stale motion packets. */
+    public void sendDrive(byte[] bytes) {
+        if (!connected || bytes.length == 0) return;
+        latestDrive.set(Arrays.copyOf(bytes, bytes.length));
+        scheduleDrivePump();
+    }
+
+    private void scheduleDrivePump() {
+        if (!drivePumpQueued.compareAndSet(false, true)) return;
+        final int id = generation.get();
+        writeQueue.execute(() -> {
+            try {
+                byte[] packet;
+                while (connected && generation.get() == id
+                        && (packet = latestDrive.getAndSet(null)) != null) {
+                    writePacket(packet, id);
+                }
+            } finally {
+                drivePumpQueued.set(false);
+                if (connected && latestDrive.get() != null) scheduleDrivePump();
+            }
+        });
     }
 
     public void send(byte[] bytes) {
@@ -119,27 +148,31 @@ public final class BluetoothSppClient {
         if (!connected) { emitError("请先连接蓝牙设备"); return; }
         final int id = generation.get();
         final byte[] packet = Arrays.copyOf(bytes, bytes.length);
-        writeQueue.execute(() -> {
-            if (!connected || generation.get() != id) return;
-            BluetoothSocket connection = socket;
-            if (connection == null) return;
-            try {
-                OutputStream output = connection.getOutputStream();
-                output.write(packet);
-                ui.post(() -> { if (generation.get() == id) listener.onSent(packet.length); });
-            } catch (IOException exception) {
-                if (generation.get() == id) {
-                    emitError("发送失败：" + exception.getMessage());
-                    disconnect(true);
-                }
+        writeQueue.execute(() -> writePacket(packet, id));
+    }
+
+    private void writePacket(byte[] packet, int id) {
+        if (!connected || generation.get() != id) return;
+        BluetoothSocket connection = socket;
+        if (connection == null) return;
+        try {
+            OutputStream output = connection.getOutputStream();
+            output.write(packet);
+            ui.post(() -> { if (generation.get() == id) listener.onSent(packet.length); });
+        } catch (IOException exception) {
+            if (generation.get() == id) {
+                emitError("发送失败：" + exception.getMessage());
+                disconnect(true);
             }
-        });
+        }
     }
 
     public void disconnect() { disconnect(true); }
 
     private void disconnect(boolean notify) {
         generation.incrementAndGet();
+        latestDrive.set(null);
+        writeQueue.getQueue().clear();
         connected = false;
         synchronized (socketLock) {
             safeClose(socket);

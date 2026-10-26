@@ -64,8 +64,6 @@ public final class MainActivity extends Activity {
     private static final String DEFAULT_UUID = "00001101-0000-1000-8000-00805F9B34FB";
     private static final String[] MACRO_LABELS = {"LED 开", "LED 关", "前进", "后退", "左转", "右转", "停止", "蜂鸣"};
     private static final String[] MACRO_COMMANDS = {"LED_ON", "LED_OFF", "F", "B", "L", "R", "S", "BEEP"};
-    private static final String[] DRIVE_KEYS = {"F", "B", "L", "R", "S"};
-    private static final String[] DRIVE_LABELS = {"前进", "后退", "左转", "右转", "停止"};
     private static final int REQ_PERMISSION = 151, REQ_ENABLE = 152, REQ_EXPORT = 153;
     private static final int MAX_LOG = 28000;
 
@@ -90,7 +88,18 @@ public final class MainActivity extends Activity {
     private final List<MacroEntry> macros = new ArrayList<>();
     private final List<SliderEntry> sliders = new ArrayList<>();
     private AxisJoystickView throttleJoystick, steeringJoystick;
+    private JoystickView singleJoystick;
+    private LinearLayout singleModePanel, dualModePanel, buttonModePanel;
     private int throttle = 0, steering = 0;
+    private final boolean[] directionHeld = new boolean[4]; // 前、后、左、右
+    private final long[] directionPressedAt = new long[4];
+    private final Runnable buttonHeartbeat = new Runnable() {
+        @Override public void run() {
+            if (!anyDirectionHeld()) return;
+            sendButtonMotion(false);
+            handler.postDelayed(this, 90);
+        }
+    };
     private static final String MACRO_STORE = "macros_v2";
     private static final String SLIDER_STORE = "sliders_v2";
     private static final class MacroEntry {
@@ -105,7 +114,6 @@ public final class MainActivity extends Activity {
         }
     }
     private OscilloscopeView chart;
-    private final List<Runnable> stopHandlers = new ArrayList<>();
 
     private boolean chartPaused = false, demoMode = false;
     private int demoTick = 0, receivedCount = 0, transmittedCount = 0;
@@ -163,7 +171,7 @@ public final class MainActivity extends Activity {
                 currentDevice = status;
                 connectButtonText.setText(connected ? "断开" : "连接设备");
                 connectionState.setTextColor(connected ? 0xff70e4cd : 0xffbbcad5);
-                if (!connected) decoder.reset();
+                if (!connected) { decoder.reset(); stopAllMotion(); }
             }
             @Override public void onReceived(byte[] bytes) { onReceiveBytes(bytes); }
             @Override public void onSent(int count) {
@@ -297,8 +305,14 @@ public final class MainActivity extends Activity {
         choose.setOnClickListener(v -> { if (client.isConnected()) client.disconnect(); else chooseDevice(); });
         header.addView(stateRow);
         gap(header, 13);
+        LinearLayout counterRow = horizontal();
         counterLabel = text("↑ TX 0 B      ↓ RX 0 B", 12, 0xffb2c9d4, false);
-        header.addView(counterLabel);
+        counterRow.addView(counterLabel, new LinearLayout.LayoutParams(0, -2, 1));
+        Button resetCounters = btn("清空/归零", false);
+        resetCounters.setTextSize(11);
+        counterRow.addView(resetCounters, lparams(96, 39));
+        resetCounters.setOnClickListener(v -> clearMonitoring());
+        header.addView(counterRow);
 
         pageHost = new FrameLayout(this);
         root.addView(pageHost, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -364,10 +378,10 @@ public final class MainActivity extends Activity {
         receive.addView(logScroller, lparams(-1, 220));
         gap(receive, 12);
         LinearLayout actions = horizontal();
-        Button clear = btn("清空日志", false), export = btn("导出 TXT", false);
+        Button clear = btn("清空 TX/RX", false), export = btn("导出 TXT", false);
         addWeighted(actions, clear); addWeighted(actions, export);
         receive.addView(actions);
-        clear.setOnClickListener(v -> { logText.setLength(0); outputLog.setText("等待串口数据…\n"); });
+        clear.setOnClickListener(v -> clearMonitoring());
         export.setOnClickListener(v -> exportLog());
         page.addView(receiveScroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
@@ -409,60 +423,114 @@ public final class MainActivity extends Activity {
     private View createControlPage() {
         ScrollView page = new ScrollView(this);
         LinearLayout body = pageBody(page);
-        LinearLayout joyCard = card(body, "双摇杆遥控");
-        notice(joyCard, "左摇杆：前进/后退；右摇杆：左转/右转。可同时按住两个摇杆，松开单侧只复位该轴。");
-        gap(joyCard, 10);
+        LinearLayout remoteCard = card(body, "小车遥控 · 三种控制模式");
+        notice(remoteCard, "三种模式共用 J,{x},{y} 数据包（可自定义）：X 转向、Y 前后速度。允许边前进边转向，手机端自动丢弃过期运动状态；STM32 必须使用组合差速而非 F/L 单独覆盖。");
+        gap(remoteCard, 10);
+        Spinner controlMode = new Spinner(this);
+        String[] controlChoices = {"360° 单摇杆", "双摇杆（左前后 / 右转向）", "四按键（长按加速）"};
+        ArrayAdapter<String> modeAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, controlChoices);
+        modeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        controlMode.setAdapter(modeAdapter);
+        remoteCard.addView(controlMode, lparams(-1, 48));
+        gap(remoteCard, 12);
+
+        singleModePanel = vertical();
+        notice(singleModePanel, "360°：向上前进、向下后退、左右转向；拖动越远，速度/转向越大。松开回中。");
+        gap(singleModePanel, 8);
+        LinearLayout singleRow = horizontal();
+        singleRow.setGravity(Gravity.CENTER);
+        singleJoystick = new JoystickView(this);
+        singleRow.addView(singleJoystick, lparams(265, 265));
+        singleModePanel.addView(singleRow);
+        singleJoystick.setListener((x, y, released) -> {
+            steering = x;
+            throttle = y;
+            sendDriveState(steering, throttle, released);
+        });
+        remoteCard.addView(singleModePanel);
+
+        dualModePanel = vertical();
+        notice(dualModePanel, "双指独立操作：左手控制前后速度，右手控制转向；各自松开只归零该轴。");
+        gap(dualModePanel, 8);
         LinearLayout both = horizontal();
         LinearLayout leftBox = vertical(); leftBox.setGravity(Gravity.CENTER);
         LinearLayout rightBox = vertical(); rightBox.setGravity(Gravity.CENTER);
-        leftBox.addView(text("左 · 油门", 13, TEAL, true));
+        leftBox.addView(text("左 · 前后速度", 13, TEAL, true));
         rightBox.addView(text("右 · 转向", 13, TEAL, true));
         throttleJoystick = new AxisJoystickView(this, AxisJoystickView.Axis.VERTICAL);
         steeringJoystick = new AxisJoystickView(this, AxisJoystickView.Axis.HORIZONTAL);
-        LinearLayout.LayoutParams axisSize = lparams(-1, 155);
-        leftBox.addView(throttleJoystick, axisSize);
+        leftBox.addView(throttleJoystick, lparams(-1, 155));
         rightBox.addView(steeringJoystick, lparams(-1, 155));
         both.addView(leftBox, new LinearLayout.LayoutParams(0, -2, 1));
         both.addView(rightBox, new LinearLayout.LayoutParams(0, -2, 1));
-        joyCard.addView(both);
-        joyReadout = text("前后 Y: 0     左右 X: 0", 13, TEAL, true);
-        joyReadout.setGravity(Gravity.CENTER);
-        joyCard.addView(joyReadout);
+        dualModePanel.addView(both);
+        remoteCard.addView(dualModePanel);
         throttleJoystick.setListener((value, released) -> {
             throttle = value;
-            sendCombinedJoystick(released);
+            sendDriveState(steering, throttle, released);
         });
         steeringJoystick.setListener((value, released) -> {
             steering = value;
-            sendCombinedJoystick(released);
+            sendDriveState(steering, throttle, released);
         });
-        notice(joyCard, "组合输出仍使用设置中的 J,{x},{y} 模板，X 为右摇杆，Y 为左摇杆。");
 
-        LinearLayout dpad = card(body, "按住即动 · 松手即停");
-        LinearLayout one = horizontal();
-        one.addView(new View(this), new LinearLayout.LayoutParams(0, dp(49), 1));
-        Button fwd = btn("▲ 前进", false);
-        addWeighted(one, fwd);
-        one.addView(new View(this), new LinearLayout.LayoutParams(0, dp(49), 1));
-        dpad.addView(one);
-        LinearLayout two = horizontal();
-        Button left = btn("◀ 左转", false), stop = btn("■ 急停", true), right = btn("右转 ▶", false);
-        addWeighted(two, left); addWeighted(two, stop); addWeighted(two, right);
-        dpad.addView(two);
-        LinearLayout three = horizontal();
-        three.addView(new View(this), new LinearLayout.LayoutParams(0, dp(49), 1));
-        Button back = btn("▼ 后退", false);
-        addWeighted(three, back);
-        three.addView(new View(this), new LinearLayout.LayoutParams(0, dp(49), 1));
-        dpad.addView(three);
-        holdToDrive(fwd, "F"); holdToDrive(back, "B");
-        holdToDrive(left, "L"); holdToDrive(right, "R");
-        stop.setOnClickListener(v -> {
-            stopAllMotion();
-            sendStopCommand();
+        buttonModePanel = vertical();
+        notice(buttonModePanel, "左列按住前进/后退，右列按住左转/右转。按住越久数值逐步增加，直到 100；松开立即归零对应方向。可以双指同时按两列。");
+        gap(buttonModePanel, 10);
+        LinearLayout buttons = horizontal();
+        LinearLayout speedButtons = vertical();
+        LinearLayout turnButtons = vertical();
+        speedButtons.addView(text("左 · 前后", 13, TEAL, true));
+        turnButtons.addView(text("右 · 左右", 13, TEAL, true));
+        Button forward = btn("▲ 前进", false);
+        Button backward = btn("▼ 后退", false);
+        Button left = btn("◀ 左转", false);
+        Button right = btn("右转 ▶", false);
+        speedButtons.addView(forward, lparams(-1, 61));
+        gap(speedButtons, 10);
+        speedButtons.addView(backward, lparams(-1, 61));
+        turnButtons.addView(left, lparams(-1, 61));
+        gap(turnButtons, 10);
+        turnButtons.addView(right, lparams(-1, 61));
+        LinearLayout.LayoutParams half = new LinearLayout.LayoutParams(0, -2, 1);
+        half.setMargins(dp(3), 0, dp(3), 0);
+        buttons.addView(speedButtons, half);
+        LinearLayout.LayoutParams half2 = new LinearLayout.LayoutParams(0, -2, 1);
+        half2.setMargins(dp(3), 0, dp(3), 0);
+        buttons.addView(turnButtons, half2);
+        buttonModePanel.addView(buttons);
+        bindDirectionButton(forward, 0);
+        bindDirectionButton(backward, 1);
+        bindDirectionButton(left, 2);
+        bindDirectionButton(right, 3);
+        remoteCard.addView(buttonModePanel);
+
+        int savedMode = preferences.getInt("control_mode", 1);
+        savedMode = Math.max(0, Math.min(2, savedMode));
+        showControlMode(savedMode);
+        controlMode.setSelection(savedMode);
+        controlMode.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            private int current = controlMode.getSelectedItemPosition();
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int mode, long id) {
+                if (mode != current) {
+                    stopAllMotion();
+                    current = mode;
+                    preferences.edit().putInt("control_mode", mode).apply();
+                }
+                showControlMode(mode);
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
-        gap(dpad, 7);
-        notice(dpad, "方向按键按下时发送 F/B/L/R，抬起发送 S。单片机仍必须设计通信超时停车保护。");
+        gap(remoteCard, 10);
+        joyReadout = text("前后速度 Y: 0     转向 X: 0", 13, TEAL, true);
+        joyReadout.setGravity(Gravity.CENTER);
+        remoteCard.addView(joyReadout);
+        gap(remoteCard, 10);
+        Button emergency = btn("■ 急停 · 输出 X=0,Y=0", true);
+        remoteCard.addView(emergency, lparams(-1, 49));
+        emergency.setOnClickListener(v -> stopAllMotion());
+        gap(remoteCard, 8);
+        notice(remoteCard, "松手、离开遥控页面或切换模式，都会立即发送归零指令。单片机还必须启用通信超时停车保护。");
 
         LinearLayout macrosCard = card(body, "自定义快捷按键");
         notice(macrosCard, "点击发送，长按编辑或删除；点“+ 添加按键”最多 64 项。");
@@ -484,48 +552,74 @@ public final class MainActivity extends Activity {
         return page;
     }
 
+    private void showControlMode(int mode) {
+        if (singleModePanel == null || dualModePanel == null || buttonModePanel == null) return;
+        singleModePanel.setVisibility(mode == 0 ? View.VISIBLE : View.GONE);
+        dualModePanel.setVisibility(mode == 1 ? View.VISIBLE : View.GONE);
+        buttonModePanel.setVisibility(mode == 2 ? View.VISIBLE : View.GONE);
+    }
+
+    private boolean anyDirectionHeld() {
+        for (boolean holding : directionHeld) if (holding) return true;
+        return false;
+    }
+
     @SuppressLint("ClickableViewAccessibility")
-    private void holdToDrive(Button button, String command) {
-        final boolean[] holding = {false};
-        final Runnable[] repeat = {null};
-        repeat[0] = new Runnable() {
-            @Override public void run() {
-                if (!holding[0]) return;
-                sendDriveCommand(command);
-                handler.postDelayed(this, 150);
-            }
-        };
-        stopHandlers.add(() -> {
-            if (holding[0]) {
-                holding[0] = false;
-                handler.removeCallbacks(repeat[0]);
-                sendStopCommand();
-            }
-        });
-        button.setOnTouchListener((v, event) -> {
-            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-                holding[0] = true;
-                sendDriveCommand(command);
-                handler.removeCallbacks(repeat[0]);
-                handler.postDelayed(repeat[0], 150);
+    private void bindDirectionButton(Button button, int index) {
+        button.setOnTouchListener((view, event) -> {
+            int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                view.getParent().requestDisallowInterceptTouchEvent(true);
+                directionHeld[index] = true;
+                directionPressedAt[index] = SystemClock.uptimeMillis();
+                sendButtonMotion(false);
+                handler.removeCallbacks(buttonHeartbeat);
+                handler.postDelayed(buttonHeartbeat, 90);
                 return true;
             }
-            if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
-                holding[0] = false;
-                handler.removeCallbacks(repeat[0]);
-                sendStopCommand();
-                v.performClick();
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                view.getParent().requestDisallowInterceptTouchEvent(false);
+                directionHeld[index] = false;
+                // Preserve an independently held button on the other axis.
+                sendButtonMotion(true);
+                if (!anyDirectionHeld()) handler.removeCallbacks(buttonHeartbeat);
+                if (action == MotionEvent.ACTION_UP) view.performClick();
                 return true;
             }
             return true;
         });
     }
 
-    private void sendCombinedJoystick(boolean released) {
-        if (joyReadout != null) joyReadout.setText("前后 Y: " + throttle + "     左右 X: " + steering);
-        String command = joystickCommand(steering, throttle);
-        if (released) sendUrgentCommand(command);
-        else sendCommand(command);
+    private void sendButtonMotion(boolean urgent) {
+        long now = SystemClock.uptimeMillis();
+        int y = DriveControlMath.buttonAxis(directionHeld[0], directionPressedAt[0],
+                directionHeld[1], directionPressedAt[1], now);
+        int x = DriveControlMath.buttonAxis(directionHeld[3], directionPressedAt[3],
+                directionHeld[2], directionPressedAt[2], now);
+        throttle = y;
+        steering = x;
+        sendDriveState(x, y, urgent);
+    }
+
+    /** One wire protocol for all three control modes. Released axes use urgent sends. */
+    private void sendDriveState(int x, int y, boolean urgent) {
+        if (joyReadout != null) joyReadout.setText("前后速度 Y: " + y + "     转向 X: " + x);
+        String command = joystickCommand(x, y);
+        if (urgent) sendUrgentCommand(command);
+        else if (client.isConnected()) {
+            String value = appendSuffix(unescape(command));
+            client.sendDrive(value.getBytes(StandardCharsets.UTF_8));
+            addLog("TX", value.replace("\r", "\\r").replace("\n", "\\n"));
+        }
+    }
+
+    private void clearMonitoring() {
+        transmittedCount = 0;
+        receivedCount = 0;
+        logText.setLength(0);
+        if (outputLog != null) outputLog.setText("等待串口数据…\n");
+        if (logScroller != null) logScroller.scrollTo(0, 0);
+        updateCounters();
     }
 
     private void loadControls() {
@@ -787,52 +881,32 @@ public final class MainActivity extends Activity {
         gap(serial, 7);
         notice(serial, "遥杆、方向键、宏按键、滑杆和文本发送均使用此结束符。HEX 手动发送除外。");
 
-        LinearLayout remote = card(body, "遥控协议自定义 · v1.2");
-        notice(remote, "支持透明 SPP 模块的任意文本指令。双摇杆仍使用同一条组合命令。{x} 表示右侧转向，{y} 表示左侧前后。单侧松开只清零该轴。");
+        LinearLayout remote = card(body, "统一小车遥控协议 · v1.3");
+        notice(remote, "三种遥控模式统一发送一条命令；{x} 为转向（左负右正），{y} 为前后速度（后退负前进正），范围均为 -100～100。四按键根据按住时间平滑加速。");
         gap(remote, 9);
-        remote.addView(text("摇杆数据模板", 13, TEXT, true));
+        remote.addView(text("三种模式共用的指令模板", 13, TEXT, true));
         gap(remote, 5);
         EditText joystickFormat = input("例如 J,{x},{y}", false);
         joystickFormat.setText(preferences.getString("joy_format", "J,{x},{y}"));
         remote.addView(joystickFormat, lparams(-1, 47));
-        gap(remote, 12);
-        final EditText[] driveEdits = new EditText[DRIVE_KEYS.length];
-        for (int i = 0; i < DRIVE_KEYS.length; i++) {
-            remote.addView(text(DRIVE_LABELS[i] + "（默认 " + DRIVE_KEYS[i] + "）", 12, MUTED, false));
-            gap(remote, 4);
-            driveEdits[i] = input("串口指令", false);
-            driveEdits[i].setText(preferences.getString("drive_" + DRIVE_KEYS[i], DRIVE_KEYS[i]));
-            remote.addView(driveEdits[i], lparams(-1, 45));
-            gap(remote, 7);
-        }
-        Button saveRemote = btn("保存遥控命令", true);
+        gap(remote, 9);
+        Button saveRemote = btn("保存统一遥控协议", true);
         remote.addView(saveRemote, lparams(-1, 46));
         saveRemote.setOnClickListener(v -> {
             String template = joystickFormat.getText().toString();
             if (!template.contains("{x}") || !template.contains("{y}") || template.length() > 120) {
-                toast("摇杆格式必须包含 {x}、{y}，且不超过120字符"); return;
+                toast("模板必须包含 {x}、{y}，且不超过120字符"); return;
             }
-            SharedPreferences.Editor editor = preferences.edit().putString("joy_format", template);
-            for (int i = 0; i < DRIVE_KEYS.length; i++) {
-                String cmd = driveEdits[i].getText().toString();
-                if (cmd.trim().isEmpty() || cmd.length() > 120) { toast("方向与停止指令不能为空或超过120字符"); return; }
-                editor.putString("drive_" + DRIVE_KEYS[i], cmd);
-            }
-            editor.apply();
-            toast("协议已保存，立即生效");
+            preferences.edit().putString("joy_format", template).apply();
+            toast("已保存：三种控制模式立即共用此协议");
         });
         gap(remote, 8);
-        Button resetRemote = btn("恢复默认遥控协议", false);
+        Button resetRemote = btn("恢复默认 J,{x},{y}", false);
         remote.addView(resetRemote, lparams(-1, 44));
         resetRemote.setOnClickListener(v -> {
-            SharedPreferences.Editor editor = preferences.edit().remove("joy_format");
+            preferences.edit().remove("joy_format").apply();
             joystickFormat.setText("J,{x},{y}");
-            for (int i = 0; i < DRIVE_KEYS.length; i++) {
-                editor.remove("drive_" + DRIVE_KEYS[i]);
-                driveEdits[i].setText(DRIVE_KEYS[i]);
-            }
-            editor.apply();
-            toast("遥控协议已重置");
+            toast("已恢复统一协议");
         });
         LinearLayout about = card(body, "说明与兼容性");
         notice(about, "• 支持 Android 8.0+ 蓝牙经典 SPP。\n• 支持已配对设备列表及附近设备发现。\n• 不支持 BLE-only 的蓝牙 GATT 模块。\n• 波特率由蓝牙模块 UART 侧与 MCU 匹配，手机端无需设置。\n• 数据只保存在本机内存或您主动导出的 TXT 文件，不上传服务器。\n• 控制电机时务必实现通信超时急停和硬件电源开关。");
@@ -873,12 +947,6 @@ public final class MainActivity extends Activity {
     }
     private String joystickCommand(int x, int y) {
         return SerialProtocol.twoAxis(preferences.getString("joy_format", "J,{x},{y}"), x, y);
-    }
-    private void sendDriveCommand(String key) {
-        sendCommand(preferences.getString("drive_" + key, key));
-    }
-    private void sendStopCommand() {
-        sendUrgentCommand(preferences.getString("drive_S", "S"));
     }
     private void sendCommand(String command) {
         if (!client.isConnected()) return; // Avoid flooding error dialogs during a joystick drag.
@@ -1059,11 +1127,14 @@ public final class MainActivity extends Activity {
         }
     }
     private void stopAllMotion() {
-        for (Runnable stop : stopHandlers) stop.run();
+        handler.removeCallbacks(buttonHeartbeat);
+        for (int i = 0; i < directionHeld.length; i++) directionHeld[i] = false;
+        if (singleJoystick != null) singleJoystick.releaseControl();
         if (throttleJoystick != null) throttleJoystick.releaseControl();
         if (steeringJoystick != null) steeringJoystick.releaseControl();
         throttle = 0;
         steering = 0;
+        sendDriveState(0, 0, true);
     }
     @Override protected void onPause() {
         stopAllMotion();
