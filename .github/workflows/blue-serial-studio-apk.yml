@@ -93,7 +93,9 @@ jobs:
           cp unpacked/app/build/outputs/apk/debug/app-debug.apk downloads/BlueSerialStudio-v1.2-debug.apk
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add downloads/BlueSerialStudio-v1.2-debug.apk
+          mkdir -p BlueSerialStudio
+          tar -C unpacked --exclude='.gradle' --exclude='*/build' --exclude='build' -cf - . | tar -C BlueSerialStudio -xf -
+          git add BlueSerialStudio downloads/BlueSerialStudio-v1.2-debug.apk
           if ! git diff --cached --quiet; then
             git commit -m "build: publish downloadable BlueSerialStudio APK"
             git push origin HEAD:blue-serial-studio
